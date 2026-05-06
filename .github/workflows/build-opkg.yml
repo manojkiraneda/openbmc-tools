@@ -1,0 +1,260 @@
+name: Build opkg binaries
+
+on:
+  push:
+    tags:
+      - 'opkg-v*'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create a GitHub release'
+        required: false
+        default: 'true'
+        type: boolean
+permissions:
+  contents: write
+jobs:
+  build-matrix:
+    name: Build opkg for ${{ matrix.os }} ${{ matrix.version }} (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 26.04 (latest), 25.10, and 24.04 (n-1)
+          - os: ubuntu
+            version: '26.04'
+            arch: x86_64
+            container: ubuntu:26.04
+          - os: ubuntu
+            version: '25.10'
+            arch: x86_64
+            container: ubuntu:25.10
+          - os: ubuntu
+            version: '24.04'
+            arch: x86_64
+            container: ubuntu:24.04
+          
+          # Fedora 44 (latest) and 43 (n-1)
+          - os: fedora
+            version: '44'
+            arch: x86_64
+            container: fedora:44
+          - os: fedora
+            version: '43'
+            arch: x86_64
+            container: fedora:43
+
+    container:
+      image: ${{ matrix.container }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install base dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu'
+        run: |
+          apt-get update
+          apt-get install -y \
+            build-essential \
+            wget \
+            tar \
+            gzip \
+            pkg-config \
+            libssl-dev \
+            libzstd-dev \
+            autoconf \
+            automake \
+            libtool \
+            file \
+            openssl \
+            libc6-dev \
+            liblzma-dev \
+            zlib1g-dev \
+
+      - name: Install base dependencies (Fedora)
+        if: matrix.os == 'fedora'
+        run: |
+          dnf install -y \
+            gcc \
+            gcc-c++ \
+            make \
+            wget \
+            tar \
+            gzip \
+            pkg-config \
+            openssl-devel \
+            libzstd-devel \
+            zlib-devel \
+            autoconf \
+            automake \
+            libtool \
+            file \
+            diffutils \
+            findutils \
+            libzstd-devel \
+            xz-devel \
+            zlib-devel \
+
+      - name: Set up environment
+        run: |
+          echo "STRIP=strip" >> $GITHUB_ENV
+
+      - name: Create build directory
+        run: |
+          mkdir -p build-${{ matrix.arch }}
+          cd build-${{ matrix.arch }}
+
+      - name: Run build-opkg script
+        run: |
+          cd build-${{ matrix.arch }}
+          
+          # Copy the build-opkg script
+          cp ../ipkdbg/build-opkg .
+          
+          # Make it executable
+          chmod +x build-opkg
+          
+          # Run the build script
+          ./build-opkg
+
+      - name: Prepare binary for upload
+        run: |
+          mkdir -p artifacts/${{ matrix.arch }}/${{ matrix.os }}/${{ matrix.version }}
+          cp build-${{ matrix.arch }}/opkg-0.6.3/src/opkg artifacts/${{ matrix.arch }}/${{ matrix.os }}/${{ matrix.version }}/opkg
+          
+          # Strip the binary
+          $STRIP --strip-all artifacts/${{ matrix.arch }}/${{ matrix.os }}/${{ matrix.version }}/opkg || true
+          
+          # Make executable
+          chmod +x artifacts/${{ matrix.arch }}/${{ matrix.os }}/${{ matrix.version }}/opkg
+          
+          # Get file info
+          file artifacts/${{ matrix.arch }}/${{ matrix.os }}/${{ matrix.version }}/opkg
+          ls -lh artifacts/${{ matrix.arch }}/${{ matrix.os }}/${{ matrix.version }}/opkg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opkg-${{ matrix.os }}-${{ matrix.version }}-${{ matrix.arch }}
+          path: artifacts/${{ matrix.arch }}/${{ matrix.os }}/${{ matrix.version }}/opkg
+          retention-days: 30
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-matrix
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Organize artifacts
+        run: |
+          mkdir -p organized-artifacts
+          cd release-artifacts
+          
+          # Reorganize artifacts into tarballs
+          for artifact_dir in opkg-*; do
+            if [ -d "$artifact_dir" ]; then
+              # Extract OS, version, and arch from directory name
+              # Format: opkg-{os}-{version}-{arch}
+              os=$(echo $artifact_dir | cut -d'-' -f2)
+              version=$(echo $artifact_dir | cut -d'-' -f3)
+              arch=$(echo $artifact_dir | cut -d'-' -f4)
+              
+              # Create a tarball for this specific binary
+              tar -czf "../organized-artifacts/opkg-${os}-${version}-${arch}.tar.gz" -C "$artifact_dir" opkg
+            fi
+          done
+          
+          cd ../organized-artifacts
+          ls -lh
+
+      - name: Generate release notes
+        run: |
+          cat > release-notes.md << 'EOF'
+          # opkg Binaries Release
+          
+          This release contains statically-linked opkg binaries for multiple distributions (x86_64 only).
+          
+          ## Supported Platforms
+          
+          ### Ubuntu (x86_64)
+          - Ubuntu 26.04 LTS
+          - Ubuntu 25.10
+          - Ubuntu 24.04 LTS
+          
+          ### Fedora (x86_64)
+          - Fedora 44
+          - Fedora 43
+          
+          ## Usage
+          
+          Download the appropriate tarball for your platform:
+          ```bash
+          # Example for Ubuntu 26.04 x86_64
+          wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name || format('opkg-v{0}', github.run_number) }}/opkg-ubuntu-26.04-x86_64.tar.gz
+          tar -xzf opkg-ubuntu-26.04-x86_64.tar.gz
+          chmod +x opkg
+          ./opkg --version
+          ```
+          
+          ## Integration with ipkdbg
+          
+          To use these binaries with ipkdbg:
+          
+          1. Download the binaries for your target platforms
+          2. Organize them in the `ipkdbg/bin/` directory following this structure:
+          ```
+          ipkdbg/bin/
+          └── x86_64/
+              ├── ubuntu/
+              │   ├── 24.04/opkg
+              │   ├── 25.10/opkg
+              │   └── 26.04/opkg
+              └── fedora/
+                  ├── 43/opkg
+                  └── 44/opkg
+          ```
+          3. Run `make` in the ipkdbg directory to generate the final ipkdbg script
+          
+          ## Build Information
+          
+          - Built from: ${{ github.repository }}
+          - Commit: ${{ github.sha }}
+          - Workflow run: ${{ github.run_id }}
+          EOF
+
+      - name: Generate tag name
+        id: tag
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "tag_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "release_name=opkg Binaries ${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            TAG_NAME="opkg-v$(date +%Y%m%d-%H%M%S)-${{ github.run_number }}"
+            echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+            echo "release_name=opkg Binaries Build ${{ github.run_number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.tag_name }}
+          name: ${{ steps.tag.outputs.release_name }}
+          body_path: release-notes.md
+          files: |
+            organized-artifacts/*.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+# Made with Bob

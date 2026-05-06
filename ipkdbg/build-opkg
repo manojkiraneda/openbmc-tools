@@ -5,7 +5,7 @@ set -eu
 set -x
 
 # : ${OPKG_LIBS:="-llzma -lldap -llber -lz -pthread"}
-: ${OPKG_LIBS:="-lz -pthread -lzstd"}
+: ${OPKG_LIBS:="-llzma -lz -pthread -lzstd"}
 
 generate_configure_id() {
     echo "$@" | sha256sum | awk '{ printf "build-opkg-%s", $1 }'
@@ -62,7 +62,6 @@ OPKG_OPTS="\
 --with-static-libopkg \
 --without-libsolv \
 --enable-curl \
---enable-openssl \
 --enable-zstd \
 --disable-gpg \
 --disable-dependency-tracking"
